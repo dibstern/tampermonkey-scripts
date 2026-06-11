@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Chat Exporter - Markdown
 // @namespace    https://github.com/rashidazarang/chatgpt-chat-exporter
-// @version      0.7.3
+// @version      0.7.4
 // @description  Export ChatGPT conversations to Markdown format
 // @author       rashidazarang
 // @match        https://chat.openai.com/*
@@ -26,7 +26,7 @@
     })(window, function buildChatExporterEngine() {
         'use strict';
 
-        const ENGINE_VERSION = '0.7.3-live-engine';
+        const ENGINE_VERSION = '0.7.4-live-engine';
         const MARKER_PREFIX = '__CHAT_EXPORTER_BLOCK_';
 
         const PROVIDERS = {
@@ -318,26 +318,37 @@
             return marker;
         }
 
+        function addMarkdownBlockReplacement(replacements, markdown) {
+            return `\n\n${addReplacement(replacements, markdown)}\n\n`;
+        }
+
         function restoreReplacements(value, replacements) {
             return replacements.reduce((result, replacement) => result.replaceAll(replacement.marker, replacement.html), value);
+        }
+
+        function markdownFenceFor(code) {
+            const matches = String(code ?? '').match(/`+/g) || [];
+            const longestRun = matches.reduce((longest, run) => Math.max(longest, run.length), 0);
+            return '`'.repeat(Math.max(3, longestRun + 1));
+        }
+
+        function fencedMarkdownCodeBlock(lang, code) {
+            const normalizedCode = normalizeCodeText(code);
+            const fence = markdownFenceFor(normalizedCode);
+            const safeLang = String(lang || '').replace(/[`\s]/g, '');
+            return `${fence}${safeLang}\n${normalizedCode}\n${fence}`;
         }
 
         function cleanMarkdown(markdown) {
             return String(markdown ?? '')
                 .replace(/\r\n?/g, '\n')
-                .split(/(```[\s\S]*?```)/g)
-                .map(part => part.startsWith('```')
-                    ? part
-                    : part
-                        // Remove trailing spaces, but do not strip indentation after newlines.
-                        // User-authored pasted text can legitimately depend on those newlines/spaces.
-                        .replace(/[ \t]+\n/g, '\n')
-                        .replace(/\n{3,}/g, '\n\n')
-                        .replace(/&lt;/g, '<')
-                        .replace(/&gt;/g, '>')
-                        .replace(/&amp;/g, '&'))
-                .join('')
+                // Remove trailing horizontal spaces, but do not strip indentation after newlines.
+                // User-authored pasted text and code-like examples may legitimately rely on it.
+                .replace(/[ \t]+\n/g, '\n')
                 .replace(/\n{3,}/g, '\n\n')
+                .replace(/&lt;/g, '<')
+                .replace(/&gt;/g, '>')
+                .replace(/&amp;/g, '&')
                 .trim();
         }
 
@@ -472,7 +483,7 @@
             const { lang, code } = extractCodeBlock(block);
 
             if (format === 'markdown') {
-                return `\n\n\`\`\`${lang}\n${code}\n\`\`\`\n\n`;
+                return addMarkdownBlockReplacement(replacements, fencedMarkdownCodeBlock(lang, code));
             }
 
             const langClass = lang ? ` class="language-${sanitizeHtml(lang)}"` : '';
@@ -536,7 +547,7 @@
                     '[Media]';
 
                 const replacement = format === 'markdown'
-                    ? label
+                    ? addMarkdownBlockReplacement(replacements, label)
                     : addReplacement(replacements, `<span class="media-placeholder">${sanitizeHtml(label)}</span>`);
                 element.replaceWith(createTextNode(element, replacement));
             });
@@ -607,7 +618,7 @@
         function processTables(clone, format, replacements) {
             topLevelElements(queryAll(clone, 'table')).forEach(table => {
                 const replacement = format === 'markdown'
-                    ? `\n\n${tableToMarkdown(table)}\n\n`
+                    ? addMarkdownBlockReplacement(replacements, tableToMarkdown(table))
                     : addReplacement(replacements, tableToHtml(table));
                 table.replaceWith(createTextNode(table, replacement));
             });
@@ -668,7 +679,7 @@
                 const label = cardLabel(card);
                 const text = label ? `[${kind}: ${label}]` : `[${kind}]`;
                 const replacement = format === 'markdown'
-                    ? text
+                    ? addMarkdownBlockReplacement(replacements, text)
                     : addReplacement(replacements, `<span class="card-placeholder">${sanitizeHtml(text)}</span>`);
                 card.replaceWith(createTextNode(card, replacement));
             });
@@ -691,12 +702,7 @@
         function markdownTextNode(value, node, context = {}) {
             const text = String(value ?? '').replace(/\u00a0/g, ' ').replace(/\r\n?/g, '\n');
 
-            if (
-                text.includes('```') ||
-                text.includes('| ---') ||
-                text.includes(MARKER_PREFIX) ||
-                text.match(/^\s*\[[^\]]+\]/)
-            ) {
+            if (text.includes(MARKER_PREFIX)) {
                 return text;
             }
 
@@ -704,8 +710,8 @@
                 return text;
             }
 
-            // Preserve line breaks, but collapse ordinary horizontal whitespace.
-            // The previous /[ \t\r\n]+/g collapsed all newlines into spaces.
+            // Preserve line breaks, but collapse ordinary runs of horizontal whitespace.
+            // Do not use /\s+/ here: that destroys user-authored line separators.
             return text
                 .replace(/[ \t]+/g, ' ')
                 .replace(/ *\n */g, '\n');
@@ -786,7 +792,9 @@
 
             const content = serializeMarkdownChildren(node, context);
             if (['div', 'section', 'article', 'main', 'message-content', 'model-response', 'user-query', 'response-element'].includes(tag)) {
-                return content;
+                return content ? `
+${content}
+` : '';
             }
 
             return content;
@@ -843,7 +851,8 @@
             processTables(clone, format, replacements);
 
             if (format === 'markdown') {
-                return cleanMarkdown(serializeMarkdownChildren(clone));
+                const markdown = cleanMarkdown(serializeMarkdownChildren(clone));
+                return restoreReplacements(markdown, replacements).trim();
             }
 
             const html = serializeHtmlChildren(clone, replacements)
