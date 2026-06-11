@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Chat Exporter - Markdown
 // @namespace    https://github.com/rashidazarang/chatgpt-chat-exporter
-// @version      0.7.5
+// @version      0.7.6
 // @description  Export ChatGPT conversations to Markdown format
 // @author       rashidazarang
 // @match        https://chat.openai.com/*
@@ -26,7 +26,7 @@
     })(window, function buildChatExporterEngine() {
         'use strict';
 
-        const ENGINE_VERSION = '0.7.5-live-engine';
+        const ENGINE_VERSION = '0.7.6-live-engine';
         const MARKER_PREFIX = '__CHAT_EXPORTER_BLOCK_';
 
         const PROVIDERS = {
@@ -332,30 +332,58 @@
             return '`'.repeat(Math.max(3, longestRun + 1));
         }
 
+        function cleanFenceLanguage(value) {
+            return String(value || '').trim().replace(/[`\s]/g, '');
+        }
+
+        function looksLikeStandaloneLanguageLine(value) {
+            const text = String(value || '').trim();
+            if (!/^[a-zA-Z][a-zA-Z0-9_+#.-]{0,31}$/.test(text)) return false;
+            return !/^(function|const|let|var|if|for|while|return|class|import|export|from|new|try|catch|finally|else|switch|case|break|continue)$/i.test(text);
+        }
+
+        function splitCodeLanguageAndBody(lang, code) {
+            let safeLang = cleanFenceLanguage(lang);
+            let normalizedCode = normalizeCodeText(code);
+
+            // Some ChatGPT DOM variants expose the code-block language label as the
+            // first text line instead of as metadata. Promote that label to the
+            // fence info string so it does not become part of the code body.
+            if (!safeLang) {
+                const lines = normalizedCode.split('\n');
+                if (lines.length > 1 && looksLikeStandaloneLanguageLine(lines[0])) {
+                    safeLang = cleanFenceLanguage(lines.shift());
+                    normalizedCode = lines.join('\n');
+                }
+            }
+
+            return { safeLang, normalizedCode };
+        }
+
         function fencedMarkdownCodeBlock(lang, code) {
-            const normalizedCode = normalizeCodeText(code);
+            const { safeLang, normalizedCode } = splitCodeLanguageAndBody(lang, code);
             const fence = markdownFenceFor(normalizedCode);
-            const safeLang = String(lang || '').replace(/[`\s]/g, '');
             return `${fence}${safeLang}\n${normalizedCode}\n${fence}`;
         }
 
-        function isMarkdownFenceLine(line, activeFence) {
+        function markdownFenceTransition(line, activeFence) {
             const match = String(line ?? '').match(/^[ \t]{0,3}(`{3,}|~{3,})/);
-            if (!match) return null;
+            if (!match) return { type: 'none' };
 
             const fence = match[1];
             if (!activeFence) {
                 return {
+                    type: 'open',
                     marker: fence[0],
                     length: fence.length
                 };
             }
 
             if (fence[0] === activeFence.marker && fence.length >= activeFence.length) {
-                return null;
+                return { type: 'close' };
             }
 
-            return false;
+            return { type: 'none' };
         }
 
         function mapMarkdownOutsideFences(value, mapOutsideLine, options = {}) {
@@ -363,18 +391,22 @@
             const result = [];
             let activeFence = null;
             let outsideBlankCount = 0;
+            const maxBlankLines = Number.isInteger(options.maxBlankLines) ? options.maxBlankLines : 1;
 
             lines.forEach((line, index) => {
-                const fenceResult = isMarkdownFenceLine(line, activeFence);
+                const transition = markdownFenceTransition(line, activeFence);
 
-                if (fenceResult !== false && fenceResult !== null) {
-                    activeFence = fenceResult;
+                if (transition.type === 'open') {
+                    activeFence = {
+                        marker: transition.marker,
+                        length: transition.length
+                    };
                     outsideBlankCount = 0;
                     result.push(line.replace(/[ \t]+$/g, ''));
                     return;
                 }
 
-                if (fenceResult === null && activeFence) {
+                if (transition.type === 'close') {
                     activeFence = null;
                     outsideBlankCount = 0;
                     result.push(line.replace(/[ \t]+$/g, ''));
@@ -390,7 +422,7 @@
                 const mapped = mapOutsideLine(line, index);
                 if (options.collapseBlankLines && mapped === '') {
                     outsideBlankCount += 1;
-                    if (outsideBlankCount <= 2) result.push(mapped);
+                    if (outsideBlankCount <= maxBlankLines) result.push(mapped);
                     return;
                 }
 
@@ -415,7 +447,7 @@
             const cleaned = mapMarkdownOutsideFences(
                 normalized,
                 line => line.replace(/[ \t]+$/g, ''),
-                { collapseBlankLines: true }
+                { collapseBlankLines: true, maxBlankLines: 1 }
             );
 
             // Do not use .trim(): it can delete leading indentation if a user message
@@ -933,7 +965,8 @@ ${content}
 
             if (format === 'markdown') {
                 const markdown = cleanMarkdown(serializeMarkdownChildren(clone));
-                return trimOuterNewlines(restoreReplacements(markdown, replacements));
+                const restored = restoreReplacements(markdown, replacements);
+                return cleanMarkdown(restored);
             }
 
             const html = serializeHtmlChildren(clone, replacements)
