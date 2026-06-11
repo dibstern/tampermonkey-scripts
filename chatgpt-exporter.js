@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Chat Exporter - Markdown
 // @namespace    https://github.com/rashidazarang/chatgpt-chat-exporter
-// @version      0.7.2
+// @version      0.7.3
 // @description  Export ChatGPT conversations to Markdown format
 // @author       rashidazarang
 // @match        https://chat.openai.com/*
@@ -26,7 +26,7 @@
     })(window, function buildChatExporterEngine() {
         'use strict';
 
-        const ENGINE_VERSION = '0.7.2-live-engine';
+        const ENGINE_VERSION = '0.7.3-live-engine';
         const MARKER_PREFIX = '__CHAT_EXPORTER_BLOCK_';
 
         const PROVIDERS = {
@@ -324,12 +324,14 @@
 
         function cleanMarkdown(markdown) {
             return String(markdown ?? '')
+                .replace(/\r\n?/g, '\n')
                 .split(/(```[\s\S]*?```)/g)
                 .map(part => part.startsWith('```')
                     ? part
                     : part
+                        // Remove trailing spaces, but do not strip indentation after newlines.
+                        // User-authored pasted text can legitimately depend on those newlines/spaces.
                         .replace(/[ \t]+\n/g, '\n')
-                        .replace(/\n[ \t]+/g, '\n')
                         .replace(/\n{3,}/g, '\n\n')
                         .replace(/&lt;/g, '<')
                         .replace(/&gt;/g, '>')
@@ -482,11 +484,16 @@
             return addReplacement(replacements, `<pre><code${langClass}>${sanitizeHtml(code)}</code></pre>`);
         }
 
-        function processCodeBlocks(clone, format, replacements) {
-            const blocks = topLevelElements(queryAll(clone, 'pre, code-block, [data-testid*="code-block"], [data-test-id*="code-block"]'));
+        function processCodeBlocks(clone, format, replacements, sourceRoot) {
+            const selector = 'pre, code-block, [data-testid*="code-block"], [data-test-id*="code-block"]';
+            const blocks = topLevelElements(queryAll(clone, selector));
+            const sourceBlocks = sourceRoot ? topLevelElements(queryAll(sourceRoot, selector)) : [];
 
-            blocks.forEach(block => {
-                const replacement = formatCodeBlock(block, format, replacements);
+            blocks.forEach((block, index) => {
+                // Extract from the live source node when possible. Detached clones can lose
+                // rendered line breaks because innerText depends on layout/connection state.
+                const sourceBlock = sourceBlocks[index] || block;
+                const replacement = formatCodeBlock(sourceBlock, format, replacements);
                 block.replaceWith(createTextNode(block, replacement));
             });
         }
@@ -667,6 +674,43 @@
             });
         }
 
+        function hasPreformattedMarkdownAncestor(node) {
+            const element = node?.nodeType === 1 ? node : node?.parentElement;
+            if (!element || typeof element.closest !== 'function') return false;
+
+            return Boolean(element.closest([
+                'pre',
+                'code-block',
+                '.whitespace-pre-wrap',
+                '[class*="whitespace-pre-wrap"]',
+                '[style*="white-space: pre"]',
+                '[style*="white-space:pre"]'
+            ].join(',')));
+        }
+
+        function markdownTextNode(value, node, context = {}) {
+            const text = String(value ?? '').replace(/\u00a0/g, ' ').replace(/\r\n?/g, '\n');
+
+            if (
+                text.includes('```') ||
+                text.includes('| ---') ||
+                text.includes(MARKER_PREFIX) ||
+                text.match(/^\s*\[[^\]]+\]/)
+            ) {
+                return text;
+            }
+
+            if (context.preserveWhitespace || hasPreformattedMarkdownAncestor(node)) {
+                return text;
+            }
+
+            // Preserve line breaks, but collapse ordinary horizontal whitespace.
+            // The previous /[ \t\r\n]+/g collapsed all newlines into spaces.
+            return text
+                .replace(/[ \t]+/g, ' ')
+                .replace(/ *\n */g, '\n');
+        }
+
         function serializeMarkdownChildren(element, context = {}) {
             return Array.from(element.childNodes).map((node, index) => serializeMarkdownNode(node, {
                 ...context,
@@ -676,11 +720,7 @@
 
         function serializeMarkdownNode(node, context = {}) {
             if (node.nodeType === 3) {
-                const value = node.nodeValue || '';
-                if (value.includes('```') || value.includes('| ---') || value.includes(MARKER_PREFIX) || value.match(/^\s*\[[^\]]+\]/)) {
-                    return value;
-                }
-                return value.replace(/[ \t\r\n]+/g, ' ');
+                return markdownTextNode(node.nodeValue || '', node, context);
             }
 
             if (node.nodeType !== 1) return '';
@@ -795,8 +835,8 @@
             const replacements = [];
 
             removeUiElements(clone);
+            processCodeBlocks(clone, format, replacements, element);
             processCards(clone, format, replacements);
-            processCodeBlocks(clone, format, replacements);
             processMath(clone);
             processMedia(clone, format, replacements);
             processLinks(clone, format, replacements);
@@ -1294,17 +1334,18 @@
         button.textContent = text;
 
         button.style.cssText = [
-            'padding: 10px 16px',
+            'padding: 6px 10px',
             `background-color: ${backgroundColor}`,
             'color: white',
             'border: none',
-            'border-radius: 5px',
+            'border-radius: 4px',
             'cursor: pointer',
             'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-            'font-size: 14px',
+            'font-size: 12px',
             'font-weight: 600',
-            'box-shadow: 0 2px 4px rgba(0,0,0,0.2)',
-            'white-space: nowrap'
+            'box-shadow: 0 1px 3px rgba(0,0,0,0.2)',
+            'white-space: nowrap',
+            'line-height: 1.2'
         ].join(';');
 
         button.addEventListener('click', () => onClick(button));
@@ -1329,12 +1370,13 @@
 
         container.style.cssText = [
             'position: fixed',
-            'bottom: 20px',
-            'right: 20px',
+            'bottom: 12px',
+            'right: 12px',
             'display: flex',
-            'gap: 8px',
+            'flex-direction: column',
+            'gap: 6px',
             'z-index: 10000',
-            'align-items: center'
+            'align-items: stretch'
         ].join(';');
 
         const copyButton = createExporterButton({
