@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Chat Exporter - Markdown
 // @namespace    https://github.com/rashidazarang/chatgpt-chat-exporter
-// @version      0.7.4
+// @version      0.7.5
 // @description  Export ChatGPT conversations to Markdown format
 // @author       rashidazarang
 // @match        https://chat.openai.com/*
@@ -26,7 +26,7 @@
     })(window, function buildChatExporterEngine() {
         'use strict';
 
-        const ENGINE_VERSION = '0.7.4-live-engine';
+        const ENGINE_VERSION = '0.7.5-live-engine';
         const MARKER_PREFIX = '__CHAT_EXPORTER_BLOCK_';
 
         const PROVIDERS = {
@@ -339,17 +339,88 @@
             return `${fence}${safeLang}\n${normalizedCode}\n${fence}`;
         }
 
+        function isMarkdownFenceLine(line, activeFence) {
+            const match = String(line ?? '').match(/^[ \t]{0,3}(`{3,}|~{3,})/);
+            if (!match) return null;
+
+            const fence = match[1];
+            if (!activeFence) {
+                return {
+                    marker: fence[0],
+                    length: fence.length
+                };
+            }
+
+            if (fence[0] === activeFence.marker && fence.length >= activeFence.length) {
+                return null;
+            }
+
+            return false;
+        }
+
+        function mapMarkdownOutsideFences(value, mapOutsideLine, options = {}) {
+            const lines = String(value ?? '').replace(/\r\n?/g, '\n').split('\n');
+            const result = [];
+            let activeFence = null;
+            let outsideBlankCount = 0;
+
+            lines.forEach((line, index) => {
+                const fenceResult = isMarkdownFenceLine(line, activeFence);
+
+                if (fenceResult !== false && fenceResult !== null) {
+                    activeFence = fenceResult;
+                    outsideBlankCount = 0;
+                    result.push(line.replace(/[ \t]+$/g, ''));
+                    return;
+                }
+
+                if (fenceResult === null && activeFence) {
+                    activeFence = null;
+                    outsideBlankCount = 0;
+                    result.push(line.replace(/[ \t]+$/g, ''));
+                    return;
+                }
+
+                if (activeFence) {
+                    // Inside user-authored fenced code, whitespace is content.
+                    result.push(line);
+                    return;
+                }
+
+                const mapped = mapOutsideLine(line, index);
+                if (options.collapseBlankLines && mapped === '') {
+                    outsideBlankCount += 1;
+                    if (outsideBlankCount <= 2) result.push(mapped);
+                    return;
+                }
+
+                outsideBlankCount = 0;
+                result.push(mapped);
+            });
+
+            return result.join('\n');
+        }
+
+        function trimOuterNewlines(value) {
+            return String(value ?? '').replace(/^\n+/, '').replace(/\n+$/, '');
+        }
+
         function cleanMarkdown(markdown) {
-            return String(markdown ?? '')
+            const normalized = String(markdown ?? '')
                 .replace(/\r\n?/g, '\n')
-                // Remove trailing horizontal spaces, but do not strip indentation after newlines.
-                // User-authored pasted text and code-like examples may legitimately rely on it.
-                .replace(/[ \t]+\n/g, '\n')
-                .replace(/\n{3,}/g, '\n\n')
                 .replace(/&lt;/g, '<')
                 .replace(/&gt;/g, '>')
-                .replace(/&amp;/g, '&')
-                .trim();
+                .replace(/&amp;/g, '&');
+
+            const cleaned = mapMarkdownOutsideFences(
+                normalized,
+                line => line.replace(/[ \t]+$/g, ''),
+                { collapseBlankLines: true }
+            );
+
+            // Do not use .trim(): it can delete leading indentation if a user message
+            // itself starts with an indented plain-text code example.
+            return trimOuterNewlines(cleaned);
         }
 
         function escapeMarkdownLinkText(value) {
@@ -699,6 +770,16 @@
             ].join(',')));
         }
 
+        function normalizeTextOutsideUserFences(text) {
+            const normalized = String(text ?? '').replace(/\u00a0/g, ' ').replace(/\r\n?/g, '\n');
+            const containsNewline = normalized.includes('\n');
+
+            return mapMarkdownOutsideFences(normalized, line => {
+                const collapsed = line.replace(/[ \t]+/g, ' ');
+                return containsNewline ? collapsed.trim() : collapsed;
+            });
+        }
+
         function markdownTextNode(value, node, context = {}) {
             const text = String(value ?? '').replace(/\u00a0/g, ' ').replace(/\r\n?/g, '\n');
 
@@ -707,14 +788,14 @@
             }
 
             if (context.preserveWhitespace || hasPreformattedMarkdownAncestor(node)) {
+                // ChatGPT user messages are commonly rendered with white-space: pre-wrap.
+                // In that case, leading spaces inside pasted code are real content.
                 return text;
             }
 
-            // Preserve line breaks, but collapse ordinary runs of horizontal whitespace.
-            // Do not use /\s+/ here: that destroys user-authored line separators.
-            return text
-                .replace(/[ \t]+/g, ' ')
-                .replace(/ *\n */g, '\n');
+            // Preserve user-authored fenced code blocks even if they are plain text
+            // rather than rendered <pre><code> nodes.
+            return normalizeTextOutsideUserFences(text);
         }
 
         function serializeMarkdownChildren(element, context = {}) {
@@ -852,7 +933,7 @@ ${content}
 
             if (format === 'markdown') {
                 const markdown = cleanMarkdown(serializeMarkdownChildren(clone));
-                return restoreReplacements(markdown, replacements).trim();
+                return trimOuterNewlines(restoreReplacements(markdown, replacements));
             }
 
             const html = serializeHtmlChildren(clone, replacements)
