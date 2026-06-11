@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Chat Exporter - Markdown
 // @namespace    https://github.com/rashidazarang/chatgpt-chat-exporter
-// @version      0.7.6
+// @version      0.7.7
 // @description  Export ChatGPT conversations to Markdown format
 // @author       rashidazarang
 // @match        https://chat.openai.com/*
@@ -26,7 +26,7 @@
     })(window, function buildChatExporterEngine() {
         'use strict';
 
-        const ENGINE_VERSION = '0.7.6-live-engine';
+        const ENGINE_VERSION = '0.7.7-live-engine';
         const MARKER_PREFIX = '__CHAT_EXPORTER_BLOCK_';
 
         const PROVIDERS = {
@@ -277,21 +277,25 @@
                 return directLines.join('\n').replace(/\u00a0/g, ' ').trimEnd();
             }
 
-            // Prefer rendered innerText only when the node is still attached to the page.
-            // Detached clones can lose rendered line breaks in some browser/userscript contexts.
+            const textContent = element.textContent || '';
+            if (textContent.includes('\n')) {
+                // textContent is the safest source for leading indentation when the
+                // DOM already contains line breaks. innerText can be affected by CSS
+                // and may normalize leading whitespace in some ChatGPT code blocks.
+                return textContent
+                    .replace(/\u00a0/g, ' ')
+                    .replace(/\r\n?/g, '\n')
+                    .trimEnd();
+            }
+
+            // Fall back to rendered innerText only when textContent does not contain
+            // line breaks. This recovers line breaks from visually line-based DOM
+            // while avoiding unnecessary indentation normalization.
             if (element.isConnected && typeof element.innerText === 'string' && element.innerText.trim()) {
                 return element.innerText
                     .replace(/\u00a0/g, ' ')
                     .replace(/\r\n?/g, '\n')
                     .replace(/\n{4,}/g, '\n\n\n')
-                    .trimEnd();
-            }
-
-            const textContent = element.textContent || '';
-            if (textContent.includes('\n')) {
-                return textContent
-                    .replace(/\u00a0/g, ' ')
-                    .replace(/\r\n?/g, '\n')
                     .trimEnd();
             }
 
@@ -478,6 +482,27 @@
 
         function topLevelElements(elements) {
             return elements.filter(element => !elements.some(other => other !== element && other.contains(element)));
+        }
+
+        const EXPORTABLE_FILELIKE_SELECTOR = [
+            'a[download]',
+            'a[href^="sandbox:"]',
+            'a[href*="/mnt/data/"]',
+            '[download]',
+            '[data-testid*="download"]',
+            '[data-test-id*="download"]',
+            '[data-testid*="file"]',
+            '[data-test-id*="file"]',
+            '[data-testid*="attachment"]',
+            '[data-test-id*="attachment"]',
+            '[class*="download-card"]',
+            '[class*="generated-file"]',
+            '[class*="file-card"]',
+            '[class*="attachment"]'
+        ].join(',');
+
+        function exportableFileLikeCount(element) {
+            return queryAll(element, EXPORTABLE_FILELIKE_SELECTOR).length;
         }
 
         function removeUiElements(clone) {
@@ -771,6 +796,7 @@
                 if (matches(element, '[data-message-author-role], user-query, model-response')) return false;
                 if (element.closest('pre, code, code-block, table')) return false;
                 if (element.querySelector('pre, code-block, table, user-query, model-response')) return false;
+                if (element.querySelector('a[href]')) return false;
 
                 const text = normalizeWhitespace(getText(element));
                 const label = cardLabel(element);
@@ -807,8 +833,16 @@
             const containsNewline = normalized.includes('\n');
 
             return mapMarkdownOutsideFences(normalized, line => {
-                const collapsed = line.replace(/[ \t]+/g, ' ');
-                return containsNewline ? collapsed.trim() : collapsed;
+                if (!containsNewline) return line.replace(/[ \t]+/g, ' ');
+
+                // In multiline user text, leading spaces may be pasted code indentation.
+                // Preserve them. Only normalize repeated spaces after the indentation.
+                const leading = line.match(/^[ \t]*/)?.[0] || '';
+                const body = line
+                    .slice(leading.length)
+                    .replace(/[ \t]+/g, ' ')
+                    .replace(/[ \t]+$/g, '');
+                return `${leading}${body}`;
             });
         }
 
@@ -905,9 +939,7 @@
 
             const content = serializeMarkdownChildren(node, context);
             if (['div', 'section', 'article', 'main', 'message-content', 'model-response', 'user-query', 'response-element'].includes(tag)) {
-                return content ? `
-${content}
-` : '';
+                return content ? `\n${content}\n` : '';
             }
 
             return content;
@@ -957,10 +989,10 @@ ${content}
 
             removeUiElements(clone);
             processCodeBlocks(clone, format, replacements, element);
-            processCards(clone, format, replacements);
             processMath(clone);
             processMedia(clone, format, replacements);
             processLinks(clone, format, replacements);
+            processCards(clone, format, replacements);
             processTables(clone, format, replacements);
 
             if (format === 'markdown') {
@@ -988,7 +1020,8 @@ ${content}
 
         function meaningfulScore(element) {
             const richCount = queryAll(element, 'pre, code-block, table, img, canvas, video, audio, annotation, script[type^="math/tex"]').length;
-            return normalizeWhitespace(element.textContent).length + richCount * 200;
+            const fileLikeCount = exportableFileLikeCount(element);
+            return normalizeWhitespace(element.textContent).length + richCount * 200 + fileLikeCount * 300;
         }
 
         function isValidMessage(element) {
@@ -1027,9 +1060,18 @@ ${content}
                 candidates.push(...queryAll(messageElement, selector));
             });
 
-            return candidates
+            const best = candidates
                 .filter(Boolean)
                 .sort((a, b) => meaningfulScore(b) - meaningfulScore(a))[0] || messageElement;
+
+            // ChatGPT sandbox/file links are often rendered as rich file cards beside
+            // the markdown/prose node rather than inside it. If we serialize only the
+            // inner .markdown/.prose root, those download links disappear entirely.
+            if (exportableFileLikeCount(messageElement) > exportableFileLikeCount(best)) {
+                return messageElement;
+            }
+
+            return best;
         }
 
         function identifySender(element, index, provider) {
