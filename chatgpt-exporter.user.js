@@ -1,5 +1,6 @@
 // ==UserScript==
 // @name         ChatGPT Chat Exporter - Markdown
+// @author       dibstern & rashidazarang
 // @namespace    https://github.com/rashidazarang/chatgpt-chat-exporter
 // @version      0.7.7
 // @description  Export ChatGPT conversations to Markdown format
