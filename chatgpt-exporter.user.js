@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ChatGPT Chat Exporter - Markdown
 // @author       dibstern & rashidazarang
-// @namespace    https://github.com/rashidazarang/chatgpt-chat-exporter
-// @version      0.7.7
+// @namespace    https://github.com/dibstern/tampermonkey-scripts
+// @version      0.7.8
 // @description  Export ChatGPT conversations to Markdown format
 // @author       rashidazarang
 // @match        https://chat.openai.com/*

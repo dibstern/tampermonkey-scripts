@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Google Slides: Copy Current Slide as Markdown
 // @author       dibstern
-// @namespace    dibstern.slides-md
-// @version      0.1.1
+// @namespace    https://github.com/dibstern/tampermonkey-scripts
+// @version      0.1.2
 // @description  Converts visible text on the currently active Google Slide to Markdown and copies it.
 // @match        https://docs.google.com/presentation/d/*
 // @grant        GM_setClipboard
